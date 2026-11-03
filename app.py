@@ -4,18 +4,18 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from scipy import stats
-import statsmodels.api as sm
-from statsmodels.formula.api import ols
+from plotly.subplots import make_subplots
 import warnings
 import requests
 import io
 import datetime
+import os
 
-# Configuración para evitar bloqueos en la nube (solo si se usa matplotlib para el PDF)
+# --- CONFIGURACIÓN PARA LA NUBE Y COLAB ---
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+# ------------------------------------------
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
@@ -93,27 +93,17 @@ def build_response_table(df, factors, metric_col):
     return df_res
 
 def plot_main_effects_plotly(df, factors, metric_col, title_metric):
-    # Usamos Plotly en lugar de Matplotlib para la web. Es instantáneo y no bloquea Streamlit Cloud.
-    from plotly.subplots import make_subplots
     fig = make_subplots(rows=1, cols=len(factors), subplot_titles=factors)
     grand_mean = df[metric_col].mean()
-    
     for i, f in enumerate(factors, 1):
         means = df.groupby(f)[metric_col].mean().reset_index()
-        fig.add_trace(
-            go.Scatter(x=means[f].astype(str), y=means[metric_col], mode='lines+markers', 
-                       marker=dict(size=8, color='#2563EB'), line=dict(width=2.5)),
-            row=1, col=i
-        )
+        fig.add_trace(go.Scatter(x=means[f].astype(str), y=means[metric_col], mode='lines+markers', marker=dict(size=8, color='#2563EB'), line=dict(width=2.5)), row=1, col=i)
         fig.add_hline(y=grand_mean, line_dash="dash", line_color="#94A3B8", row=1, col=i)
-        
     fig.update_layout(title_text=f"Efectos Principales: {title_metric}", height=350, showlegend=False, template="plotly_white")
-    fig.update_xaxes(title_text="Nivel")
     if len(factors) > 0: fig.update_yaxes(title_text=title_metric, col=1)
     return fig
 
-def generar_figura_bytes_matplotlib(df, factors, metric_col, title_metric, ylabel):
-    # Solo para incrustar en el PDF
+def generar_figura_bytes_matplotlib(df, factors, metric_col, title_metric):
     k = len(factors)
     fig, axes = plt.subplots(1, k, figsize=(max(3.2 * k, 6), 3.6), sharey=True, dpi=100)
     if k == 1: axes = [axes]
@@ -131,23 +121,19 @@ def generar_figura_bytes_matplotlib(df, factors, metric_col, title_metric, ylabe
     buf.seek(0)
     return buf
 
-def generate_pdf_report(study_name, resp_sn, resp_mean, df_anova, opt_info, fig_sn_buf, fig_mean_buf):
+def generate_pdf_report(resp_sn, resp_mean, df_anova, opt_info, fig_sn_buf, fig_mean_buf):
     pdf_buffer = io.BytesIO()
     doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
     styles = getSampleStyleSheet()
-    story = [
-        Paragraph(f"Reporte Taguchi: {study_name}", styles['Heading1']),
-        HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563EB'), spaceAfter=10),
-        Paragraph("1. Tabla S/N", styles['Heading2'])
-    ]
-    
-    t_sn = Table([["Nivel"] + list(resp_sn.columns)] + [[str(idx)] + [f"{v:.3f}" for v in row] for idx, row in resp_sn.iterrows()])
+    story = [Paragraph("Reporte de Optimización Taguchi", styles['Heading1']), HRFlowable(width="100%", thickness=1.5, color=colors.HexColor('#2563EB'), spaceAfter=10), Paragraph("1. Tabla S/N", styles['Heading2'])]
+    table_data_sn = [["Nivel"] + list(resp_sn.columns)]
+    for idx_label in resp_sn.index:
+        row = [str(idx_label)] + [f"{resp_sn.loc[idx_label, c]:.3f}" if isinstance(resp_sn.loc[idx_label, c], float) else str(resp_sn.loc[idx_label, c]) for c in resp_sn.columns]
+        table_data_sn.append(row)
+    t_sn = Table(table_data_sn)
     t_sn.setStyle(TableStyle([('GRID', (0, 0), (-1, -1), 0.5, colors.grey)]))
     story.append(t_sn)
-    
-    if fig_sn_buf:
-        story.extend([Spacer(1, 10), Image(fig_sn_buf, width=500, height=150)])
-        
+    if fig_sn_buf: story.extend([Spacer(1, 10), Image(fig_sn_buf, width=500, height=150)])
     doc.build(story)
     pdf_buffer.seek(0)
     return pdf_buffer.getvalue()
@@ -238,7 +224,6 @@ if 'df_taguchi' in st.session_state and st.session_state.get('factores_taguchi')
     resp_sn = build_response_table(df_work, factors, "SN_Ratio")
     resp_mean = build_response_table(df_work, factors, "Media")
 
-    # ANOVA Completo (Igual que en tu versión de Colab original)
     gm_m = df_work["Media"].mean()
     ss_total_m = ((df_work["Media"] - gm_m) ** 2).sum()
     df_total_m = len(df_work) - 1
@@ -258,13 +243,12 @@ if 'df_taguchi' in st.session_state and st.session_state.get('factores_taguchi')
     ms_res = (ss_res / df_res) if df_res > 0 else 0.0
     for r in anova_rows:
         r["F"] = (r["MS"] / ms_res) if ms_res > 0 else np.nan
-        r["P-Valor"] = stats.f.sf(r["F"], r["GL"], df_res) if ms_res > 0 and not np.isnan(r["F"]) else np.nan
-
+        r["P-Valor"] = np.nan
+        
     df_anova = pd.DataFrame(anova_rows)
     if df_res > 0:
         df_anova = pd.concat([df_anova, pd.DataFrame([{"Factor": "Error", "GL": df_res, "SS": ss_res, "MS": ms_res, "F": np.nan, "P-Valor": np.nan, "Contrib_pct": (ss_res / ss_total_m * 100.0) if ss_total_m > 0 else 0}]), pd.DataFrame([{"Factor": "Total", "GL": df_total_m, "SS": ss_total_m, "MS": np.nan, "F": np.nan, "P-Valor": np.nan, "Contrib_pct": 100.0}])], ignore_index=True)
 
-    # Optimización
     opt_sn_levels = {f: df_work.groupby(f)["SN_Ratio"].mean().idxmax() for f in factors}
     opt_mean_levels = {}
     for f in factors:
@@ -295,27 +279,24 @@ if 'df_taguchi' in st.session_state and st.session_state.get('factores_taguchi')
         st.dataframe(resp_mean.style.format(precision=3), use_container_width=True)
     
     with tab3:
-        # Gráficos con Plotly (No bloquean la nube)
         fig_sn_plotly = plot_main_effects_plotly(df_work, factors, "SN_Ratio", "Relación S/N")
         st.plotly_chart(fig_sn_plotly, use_container_width=True)
-        
         fig_mean_plotly = plot_main_effects_plotly(df_work, factors, "Media", "Media de Respuesta")
         st.plotly_chart(fig_mean_plotly, use_container_width=True)
     
     with tab4:
         st.subheader("Análisis de Varianza (ANOVA)")
-        st.dataframe(df_anova.style.format({"SS": "{:.4f}", "MS": "{:.4f}", "F": "{:.3f}", "P-Valor": "{:.4f}", "Contrib_pct": "{:.2f}%"}), use_container_width=True)
+        st.dataframe(df_anova.style.format({"SS": "{:.4f}", "MS": "{:.4f}", "F": "{:.3f}", "Contrib_pct": "{:.2f}%"}), use_container_width=True)
     
     with tab5:
         st.markdown(f"**Condición Óptima (S/N):** `{opt_info['sn_levels']}` | **Predicción:** {pred_sn:.3f} dB")
         st.markdown(f"**Condición Óptima (Media):** `{opt_info['mean_levels']}` | **Predicción:** {pred_mean:.3f}")
         
         if st.button("Generar Reporte PDF"):
-            # Generamos las imágenes solo para el PDF (con matplotlib)
-            buf_sn = generar_figura_bytes_matplotlib(df_work, factors, "SN_Ratio", "Relación S/N", "S/N (dB)")
-            buf_mean = generar_figura_bytes_matplotlib(df_work, factors, "Media", "Media", "Y")
+            buf_sn = generar_figura_bytes_matplotlib(df_work, factors, "SN_Ratio", "Relación S/N")
+            buf_mean = generar_figura_bytes_matplotlib(df_work, factors, "Media", "Media")
             
-            pdf_bytes = generate_pdf_report("Estudio Taguchi", resp_sn, resp_mean, df_anova, opt_info, buf_sn, buf_mean)
+            pdf_bytes = generate_pdf_report(resp_sn, resp_mean, df_anova, opt_info, buf_sn, buf_mean)
             st.download_button("📥 Descargar Reporte PDF", data=pdf_bytes, file_name="Reporte_Taguchi.pdf", mime="application/pdf")
 
 else:
