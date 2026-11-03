@@ -2,8 +2,6 @@ streamlit
 pandas
 numpy
 plotly
-scipy
-statsmodels
 matplotlib
 reportlab
 requests
